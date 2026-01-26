@@ -1,3 +1,49 @@
+# Spire AI Master
+
+基于 Python 和 PySide6 的《杀戮尖塔》AI 辅助工具。通过实时分析游戏状态，为玩家提供出牌建议。
+
+## 🚀 快速开始
+
+### 1. 启动游戏
+确保已安装并启用了 **CommunicationMod**。
+
+### 2. 启动后端 (AI Engine)
+```bash
+python src/main.py
+```
+终端显示 `GameBridge initialized` 即表示后端已就绪，正在等待游戏连接。
+
+### 3. 启动前端 (Overlay UI)
+```bash
+python src/ui/overlay_ui.py
+```
+UI 窗口将自动连接到后端，并置顶显示当前手牌的推荐评分。
+
+## 📚 文档
+
+详细文档请参阅 `docs/` 目录：
+- [项目总结 (Project Summary)](docs/project_summary.md): 架构图、核心功能说明。
+- [问题追踪 (Bug Tracker)](docs/bug_tracker.md): 常见问题及解决方案（编码、端口、死锁等）。
+- [项目结构](docs/PROJECT_STRUCTURE.md): 文件目录说明。
+
+## ✨ 核心特性
+
+*   **实时推荐**: 基于启发式算法（参考 Bottled AI）实时计算卡牌评分。
+*   **无缝融合**: 半透明、无边框置顶 UI，不干扰游戏体验。
+*   **智能决策**:
+    *   **AOE 识别**: 智能识别群体攻击时机。
+    *   **力量成长**: 动态调整多段攻击优先级。
+    *   **斩杀计算**: 优先推荐能终结敌人的卡牌。
+*   **双模式**: 支持“辅助模式”（仅推荐）和“自动模式”（AI 接管）。
+
+## 🔧 技术栈
+*   **Backend**: Python, spirecomm (CommunicationMod 协议库)
+*   **Frontend**: PySide6 (Qt for Python)
+*   **IPC**: TCP Socket (JSON Protocol)
+
+
+
+# 项目计划
 # 项目在一些开源项目的基础上进行开发。有好几个方案，我准备采取快速迭代部署的方式。先从简单的开始，逐步完善。
 
 
