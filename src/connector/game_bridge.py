@@ -146,8 +146,33 @@ class GameBridge(SimpleAgent):
                 has_strength = True
                 strength_amt = p.amount
                 break
+        
+        # --- 2. 预计算：手牌总伤害 (Pre-calculate Total Hand Damage) ---
+        # 简单估算手牌能造成的总伤害，用于判断是否具备“斩杀线”
+        total_hand_damage = 0
+        attack_cards = []
+        
+        for card in self.game.hand:
+            if card.type == CardType.ATTACK and card.cost <= player.energy: # 只计算能打出的牌
+                # 简单伤害估算
+                dmg = 6 # 默认 Strike
+                if "strike" in card.card_id.lower() or "打击" in card.name.lower(): 
+                    dmg = 6
+                elif "bash" in card.card_id.lower(): 
+                    dmg = 8
+                
+                dmg += strength_amt # 加上力量加成
+                total_hand_damage += dmg
+                attack_cards.append(card)
 
-        # --- 2. 遍历手牌打分 ---
+        # 检查是否对某个怪物有斩杀能力 (Total Lethal Check)
+        # 如果总伤害足以杀死某个怪物，那么所有攻击牌的价值都应提升
+        can_kill_monster_map = {} # monster_index -> boolean
+        for m in monsters:
+            if m.current_hp <= total_hand_damage:
+                can_kill_monster_map[m.monster_index] = True
+
+        # --- 3. 遍历手牌打分 ---
         for card in self.game.hand:
             score = 50 # 基础分
             
@@ -194,19 +219,32 @@ class GameBridge(SimpleAgent):
                 if has_strength and is_multi_hit:
                     score += 10 + (strength_amt * 2) # 力量越高，多段攻击价值越高
 
-                # 斩杀判断
-                can_kill = False
-                # 简单估算伤害（实际应该读取 dynamic damage，但这里简化）
+                # 斩杀判断 (Lethal Logic)
+                is_lethal_contributor = False
+                
+                # A. 单卡斩杀 (Single Card Lethal)
+                estimated_damage = 6 # 默认值
                 if "strike" in lower_id or "打击" in lower_name: estimated_damage = 6 + strength_amt
                 elif "bash" in lower_id: estimated_damage = 8 + strength_amt
                 
+                single_card_lethal = False
                 for m in monsters:
                     if m.current_hp <= estimated_damage:
-                        can_kill = True
+                        single_card_lethal = True
                         break
                 
-                if can_kill:
-                    score += 50 # 斩杀极高优先级
+                # B. 组合斩杀 (Combo Lethal)
+                # 如果这张卡是攻击牌，且全队总伤害能造成击杀，这张卡就是斩杀组件
+                combo_lethal = False
+                for m in monsters:
+                    if can_kill_monster_map.get(m.monster_index, False):
+                        combo_lethal = True
+                        break
+
+                if single_card_lethal:
+                    score += 50 # 单卡直接斩杀，极高优先级
+                elif combo_lethal:
+                    score += 40 # 组合斩杀组件，高优先级 (足以超过普通防御)
                 else:
                     score += 10 # 普通攻击加分
 

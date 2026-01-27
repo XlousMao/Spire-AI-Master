@@ -9,7 +9,7 @@ Spire-AI-Master/
 │   ├── agents/         # [Python] AI 代理逻辑 (大脑)
 │   ├── connector/      # [Python] 游戏通信层 (适配器)
 │   ├── core/           # [Python] 核心数据结构与状态管理
-│   ├── ui/             # [C++] Qt6 用户界面工程
+│   ├── ui/             # [Python] PySide6 用户界面 (原 C++ 方案已废弃)
 │   └── utils/          # [Python] 通用工具函数
 ├── docs/               # 项目文档
 ├── tests/              # 测试用例
@@ -21,40 +21,33 @@ Spire-AI-Master/
 ## 详细说明
 
 ### 1. external/ (第三方库)
-这里存放需要修改源码或作为子模块引用的第三方项目。请在此目录下运行以下命令来获取必要的依赖：
+这里存放需要修改源码或作为子模块引用的第三方项目。
 
 **必须 (基础通信):**
-```bash
-# SpireComm: 负责与 Slay the Spire 游戏进程通信 (Java <-> Python)
-cd external
-git clone git@github.com:ForgottenArbiter/spirecomm.git
-```
+*   **SpireComm**: 负责与 Slay the Spire 游戏进程通信 (Java <-> Python Stdin/Stdout)。
+    *   本项目采用 **Vendoring** 方式（直接包含源码）而非 Git Submodule，以避免版本控制问题。
 
-**可选 (参考逻辑/模型):**
-```bash
-# BottledAI: 启发式算法参考 (Java项目，主要看逻辑)
-git clone https://github.com/BoardEngineer/BottledAI.git
-
-# SLAI-the-Spire: 深度强化学习模型参考
-git clone https://github.com/upper-institute/slai-the-spire.git
-```
+**参考库:**
+*   **BottledAI**: 启发式算法参考 (Java项目)。
 
 ### 2. src/ (源代码)
 
-由于采用了 **Python AI 后端 + C++ Qt 前端** 的架构，代码分为两部分：
+本项目目前采用 **全 Python 架构** (Backend + Frontend)。
 
-#### Python 部分 (AI Engine)
-*   **`connector/`**: 负责与 `spirecomm` 对接，同时作为 Socket Server 与 C++ UI 通信。
-    *   目标: 接收游戏状态 -> 清洗数据 -> 发送给 UI。
-*   **`core/`**: 定义 Python 侧的数据结构。
-*   **`agents/`**: AI 决策逻辑 (RuleBased / DQN)。
+#### Python AI Engine (Backend)
 *   **`main.py`**: 启动 Python 后端服务。
+*   **`connector/`**: 
+    *   `GameBridge`: 核心桥接类，继承自 SpireComm 的 `Coordinator`。
+    *   职责：通过 Stdin/Stdout 接收 CommunicationMod 发来的游戏状态 -> 调用 AI 评分 -> 将结果通过 TCP Socket (Port 9999) 广播给 UI。
+*   **`agents/`**: 
+    *   目前实现为简单的规则引擎 (Rule-Based)，位于 `GameBridge.calculate_recommendation` 中。
+    *   未来将扩展为独立的 Agent 类。
 
-#### C++ 部分 (UI Frontend)
-*   **`ui/`**: 独立的 CMake/QMake 工程。
-    *   包含 `CMakeLists.txt` 或 `.pro` 文件。
-    *   **Socket Client**: 连接 Python 后端，接收 JSON 格式的状态数据并渲染。
-    *   **Overlay**: 透明置顶窗口实现。
+#### Python UI Overlay (Frontend)
+*   **`ui/overlay_ui.py`**: 基于 PySide6 的透明置顶窗口。
+    *   **DataReceiver**: 独立线程，连接 TCP 9999 端口接收后端数据。
+    *   **OverlayWindow**: 无边框、半透明、鼠标穿透（可选）的悬浮窗，绘制在游戏窗口之上。
+    *   **CardItemWidget**: 显示单张卡牌的推荐分数和理由。
 
 ### 3. 环境配置
 
@@ -62,19 +55,17 @@ git clone https://github.com/upper-institute/slai-the-spire.git
 ```bash
 pip install -r requirements.txt
 ```
-
-#### C++ 环境
-*   **Qt 6.x**: 请安装 Qt 6 开发环境 (建议使用 Qt Creator)。
-*   **Compiler**: MSVC (Windows) 或 GCC/Clang。
-*   **CMake**: 构建工具。
+主要依赖：
+*   `pyside6`: UI 框架
+*   `spirecomm`: 游戏通信 (需确保 `external/spirecomm` 在 PYTHONPATH 中)
 
 ---
 
-## 开发路线图 (Roadmap)
+## 架构演进记录
 
-1.  **Phase 1 (本周)**:
-    *   [Python] 跑通 `spirecomm`，获取游戏数据。
-    *   [Python] 搭建简单的 Socket Server，广播游戏状态。
-    *   [C++] 写一个简单的 Qt 窗口，连接 Socket 并显示文本信息。
-2.  **Phase 2**: 实现 `RuleBasedAgent`，能自动打出费用允许的攻击牌。
-3.  **Phase 3**: 完善 C++ 界面，绘制精美的卡牌建议 UI。
+1.  **Phase 1 (Initial)**: 尝试 Python 后端 + C++ Qt 前端。
+    *   *变更*: 由于跨语言联调复杂且 PySide6 功能已足够强大，放弃 C++ 前端方案，统一使用 Python。
+2.  **Phase 2 (Current)**: Python 后端 (SpireComm) + Python 前端 (PySide6 Overlay)。
+    *   实现了基于规则的打牌推荐。
+    *   实现了斩杀识别 (Combo Lethal)。
+    *   实现了自动/手动开始游戏切换。
