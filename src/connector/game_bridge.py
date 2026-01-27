@@ -147,23 +147,64 @@ class GameBridge(SimpleAgent):
                 strength_amt = p.amount
                 break
         
-        # --- 2. 预计算：手牌总伤害 (Pre-calculate Total Hand Damage) ---
-        # 简单估算手牌能造成的总伤害，用于判断是否具备“斩杀线”
+        # --- 2. 预计算：最大可造成伤害 (Pre-calculate Max Possible Damage) ---
+        # 考虑能量限制和卡牌组合，计算当前回合能造成的最大伤害
         total_hand_damage = 0
-        attack_cards = []
+        attack_cards = [c for c in self.game.hand if c.type == CardType.ATTACK]
         
-        for card in self.game.hand:
-            if card.type == CardType.ATTACK and card.cost <= player.energy: # 只计算能打出的牌
-                # 简单伤害估算
-                dmg = 6 # 默认 Strike
-                if "strike" in card.card_id.lower() or "打击" in card.name.lower(): 
-                    dmg = 6
-                elif "bash" in card.card_id.lower(): 
-                    dmg = 8
+        # 简单的背包问题解法 (Greedy approach for max damage)
+        # 方案 A: 优先打出易伤牌 (Vulnerable Priority)
+        damage_a = 0
+        energy_a = player.energy
+        has_vulnerable = False
+        
+        # 寻找易伤源
+        vulnerable_cards = [c for c in attack_cards if "bash" in c.card_id.lower() or "terror" in c.card_id.lower() or "shockwave" in c.card_id.lower() or "uppercut" in c.card_id.lower() or "thunderclap" in c.card_id.lower() or "beam cell" in c.card_id.lower()]
+        other_attacks = [c for c in attack_cards if c not in vulnerable_cards]
+        
+        if vulnerable_cards and energy_a >= vulnerable_cards[0].cost:
+            vuln_card = vulnerable_cards[0]
+            # 计算易伤牌伤害
+            base_dmg = 6
+            if "bash" in vuln_card.card_id.lower(): base_dmg = 8
+            damage_a += base_dmg + strength_amt
+            energy_a -= vuln_card.cost
+            has_vulnerable = True
+            
+        # 填充剩余能量
+        sorted_others = sorted(other_attacks, key=lambda c: 6 if "strike" in c.card_id.lower() else 5, reverse=True) # 简单按伤害排序
+        for card in sorted_others:
+            if energy_a >= card.cost:
+                base_dmg = 6
+                if "strike" in card.card_id.lower(): base_dmg = 6
+                final_dmg = base_dmg + strength_amt
+                if has_vulnerable:
+                    final_dmg = int(final_dmg * 1.5)
+                damage_a += final_dmg
+                energy_a -= card.cost
                 
-                dmg += strength_amt # 加上力量加成
-                total_hand_damage += dmg
-                attack_cards.append(card)
+        # 方案 B: 纯伤害最大化 (Pure Damage)
+        # 简单按 D/C (Damage Per Cost) 排序? 或者直接按伤害高低填入
+        # 这里简化为按伤害排序
+        damage_b = 0
+        energy_b = player.energy
+        all_sorted = sorted(attack_cards, key=lambda c: 8 if "bash" in c.card_id.lower() else 6, reverse=True)
+        for card in all_sorted:
+            if energy_b >= card.cost:
+                base_dmg = 6
+                if "bash" in card.card_id.lower(): base_dmg = 8
+                damage_b += base_dmg + strength_amt
+                energy_b -= card.cost
+                
+        total_hand_damage = max(damage_a, damage_b)
+
+        # 修正：考虑怪物格挡/蜷身 (Curl Up Adjustment)
+        # 如果怪物有 Curl Up，总伤害需要减去 3 (假设我们会触发它)
+        # 这里简单对所有怪物做保守估计
+        for m in monsters:
+             for p in m.powers:
+                 if p.power_id == "Curl Up":
+                     total_hand_damage -= p.amount
 
         # 检查是否对某个怪物有斩杀能力 (Total Lethal Check)
         # 如果总伤害足以杀死某个怪物，那么所有攻击牌的价值都应提升
@@ -201,15 +242,11 @@ class GameBridge(SimpleAgent):
                 lower_name = card.name.lower()
                 lower_id = card.card_id.lower()
                 
-                # AOE 识别
-                aoe_keywords = ["cleave", "whirlwind", "dagger spray", "immolate", "combust", "thunderclap", "consecrate", "sweeping beam", "blizzard", "electrodynamics", "hyperbeam", "all for one"]
-                if any(k in lower_name for k in aoe_keywords) or any(k in lower_id for k in aoe_keywords):
-                    is_aoe = True
-                
-                # 多段攻击识别
-                multi_hit_keywords = ["twin strike", "pummel", "sword boomerang", "riddle with holes", "tantrum", "barrage", "fiend fire"]
-                if any(k in lower_name for k in multi_hit_keywords) or any(k in lower_id for k in multi_hit_keywords):
-                    is_multi_hit = True
+                # 易伤源识别 (Vulnerable Source)
+                is_vulnerable_source = False
+                vulnerable_keywords = ["bash", "terror", "shockwave", "uppercut", "thunderclap", "beam cell"]
+                if any(k in lower_id for k in vulnerable_keywords):
+                    is_vulnerable_source = True
 
                 # AOE 加分
                 if is_aoe and monster_count > 1:
@@ -244,9 +281,20 @@ class GameBridge(SimpleAgent):
                 if single_card_lethal:
                     score += 50 # 单卡直接斩杀，极高优先级
                 elif combo_lethal:
-                    score += 40 # 组合斩杀组件，高优先级 (足以超过普通防御)
+                    score += 40 # 组合斩杀组件，高优先级
+                    
+                    # 关键修正：如果是易伤源，且有后续伤害，给予额外加分以确保先手打出
+                    if is_vulnerable_source and len(attack_cards) > 1:
+                         score += 25 # 确保超过普通打击 (40 vs 40+25)
+                         # 抵消高费用的惩罚
+                         if card.cost >= 2:
+                             score += 5
                 else:
                     score += 10 # 普通攻击加分
+                    
+                    # 非斩杀情况下的易伤也很重要
+                    if is_vulnerable_source and len(attack_cards) > 1:
+                        score += 15
 
             # B. 防御牌逻辑
             elif card.type == CardType.SKILL:
