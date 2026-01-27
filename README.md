@@ -36,6 +36,17 @@ UI 窗口将自动连接到后端，并置顶显示当前手牌的推荐评分�
     *   **斩杀计算**: 优先推荐能终结敌人的卡牌。
 *   **双模式**: 支持“辅助模式”（仅推荐）和“自动模式”（AI 接管）。
 
+## 📊 数据采集 (Data Collection)
+
+为了支持后续的强化学习模型训练 (Phase 2)，项目内置了数据采集模块。
+
+*   **功能**: 自动记录每一回合的战斗状态（怪物血量、意图、手牌特征）及 AI 的决策结果。
+*   **存储**: 数据保存在 `data/training_data.csv` 文件中。
+*   **配置**: 默认开启。如需关闭，请修改 `src/connector/game_bridge.py` 的 `__init__` 方法：
+    ```python
+    self.collect_data = False # 设置为 False 以关闭采集
+    ```
+
 ## 🔧 技术栈
 *   **Backend**: Python, spirecomm (CommunicationMod 协议库)
 *   **Frontend**: PySide6 (Qt for Python)

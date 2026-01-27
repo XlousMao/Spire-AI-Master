@@ -4,6 +4,9 @@ import socket
 import logging
 import sys
 import time
+import os
+import csv
+import hashlib
 from typing import Dict, Any
 
 from spirecomm.ai.agent import SimpleAgent
@@ -45,6 +48,16 @@ class GameBridge(SimpleAgent):
         self.auto_play = False  # 默认关闭自动打牌
         self.auto_start = False # 默认关闭自动开始游戏
         
+        # 数据采集配置
+        self.collect_data = True
+        # 使用绝对路径，确保文件位置正确
+        root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        self.data_dir = os.path.join(root_dir, "data")
+        self.data_file = os.path.join(self.data_dir, "training_data.csv")
+        self.log_file = os.path.join(self.data_dir, "collection_debug.log") # 调试日志
+        self.last_state_hash = None
+        self._init_data_collection()
+
         # 启动 Socket 监听线程
         self.socket_thread = threading.Thread(target=self._accept_client, daemon=True)
         self.socket_thread.start()
@@ -59,6 +72,152 @@ class GameBridge(SimpleAgent):
                 self.client_socket = client
             except Exception as e:
                 logger.error(f"Socket accept error: {e}")
+
+    def _log_debug(self, msg):
+        """写入调试日志"""
+        try:
+            with open(self.log_file, 'a', encoding='utf-8') as f:
+                f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} - {msg}\n")
+        except:
+            pass
+
+    def _init_data_collection(self):
+        """初始化数据采集模块"""
+        if not self.collect_data: return
+        try:
+            if not os.path.exists(self.data_dir):
+                os.makedirs(self.data_dir)
+            
+            # 如果文件不存在，写入表头
+            if not os.path.exists(self.data_file):
+                with open(self.data_file, 'w', newline='', encoding='utf-8') as f:
+                    writer = csv.writer(f)
+                    writer.writerow([
+                        "timestamp", "floor", "hp_ratio", "energy",
+                        "monsters_hp", "monsters_intents", "incoming_damage",
+                        "hand_size", "attack_ratio", "skill_ratio", "max_damage_card",
+                        "best_card_name", "best_card_score", "uuid"
+                    ])
+            self._log_debug(f"Data collection initialized: {self.data_file}")
+            logger.info(f"Data collection initialized: {self.data_file}")
+        except Exception as e:
+            logger.error(f"Failed to init data collection: {e}")
+            self._log_debug(f"Init failed: {e}")
+
+    def _get_state_hash(self, player, monsters, hand):
+        """生成当前状态的哈希值用于去重"""
+        state_str = f"{self.game.floor}-{player.current_hp}-{player.energy}-"
+        state_str += f"{','.join([str(m.current_hp) for m in monsters])}-"
+        state_str += f"{','.join([getattr(c, 'uuid', 'noun') for c in hand])}"
+        return hashlib.md5(state_str.encode()).hexdigest()
+
+    def _record_decision_step(self, recommendations):
+        """记录当前决策步骤的数据"""
+        if not self.collect_data:
+            return
+
+        if not self.game:
+            self._log_debug("Skipped: No game state")
+            return
+            
+        if not self.game.in_combat:
+            self._log_debug("Skipped: Not in combat")
+            return
+
+        try:
+            player = self.game.player
+            monsters = [m for m in self.game.monsters if not m.is_gone and not m.half_dead]
+            hand = self.game.hand
+            
+            # 去重检测
+            current_hash = self._get_state_hash(player, monsters, hand)
+            if current_hash == self.last_state_hash:
+                # self._log_debug("Skipped: Duplicate state") # 太频繁，先注释掉
+                return
+            self.last_state_hash = current_hash
+            
+            self._log_debug(f"Recording state... Hand size: {len(hand)}")
+
+            # 1. 基础信息
+            hp_ratio = round(player.current_hp / player.max_hp, 2) if player.max_hp > 0 else 0
+            
+            # 2. 敌情
+            total_monster_hp = sum(m.current_hp for m in monsters)
+            # 意图简化：A=Attack, N=Non-Attack
+            intents = []
+            incoming_damage = 0
+            
+            for m in monsters:
+                intent_char = "U" # Unknown
+                if hasattr(m, "intent"):
+                    if hasattr(m.intent, "is_attack"):
+                         intent_char = "A" if m.intent.is_attack() else "N"
+                    else:
+                         intent_char = str(m.intent)[0]
+                intents.append(intent_char)
+                
+                # 计算预计伤害
+                if intent_char == "A":
+                    damage = getattr(m, "move_adjusted_damage", 0) or 0
+                    hits = getattr(m, "move_hits", 1) or 1
+                    incoming_damage += damage * hits
+            
+            # 3. 手牌特征
+            hand_size = len(hand)
+            attacks = [c for c in hand if c.type == CardType.ATTACK]
+            skills = [c for c in hand if c.type == CardType.SKILL]
+            attack_ratio = round(len(attacks) / hand_size, 2) if hand_size > 0 else 0
+            skill_ratio = round(len(skills) / hand_size, 2) if hand_size > 0 else 0
+            
+            # 最大伤害估算 (简单版)
+            max_dmg = 0
+            strength_amt = 0
+            for p in player.powers:
+                if p.power_id == "Strength":
+                    strength_amt = p.amount
+                    break
+            
+            for c in attacks:
+                dmg = 6 # 默认
+                c_name = getattr(c, "name", "")
+                if "strike" in c_name.lower() or "打击" in c_name: dmg = 6
+                elif "bash" in c_name.lower() or "痛击" in c_name: dmg = 8
+                max_dmg = max(max_dmg, dmg + strength_amt)
+
+            # 4. 决策输出
+            best_card_name = "None"
+            best_score = 0
+            best_uuid = ""
+            
+            if recommendations:
+                # 过滤掉得分为0的推荐
+                valid_recs = {k: v for k, v in recommendations.items() if v > 0}
+                if valid_recs:
+                    best_uuid = max(valid_recs, key=valid_recs.get)
+                    best_score = valid_recs[best_uuid]
+                    # 查找卡牌对象
+                    best_card = next((c for c in hand if getattr(c, 'uuid', '') == best_uuid), None)
+                    if best_card:
+                        best_card_name = best_card.name
+
+            # 写入 CSV
+            with open(self.data_file, 'a', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    time.time(), self.game.floor, hp_ratio, player.energy,
+                    total_monster_hp, "|".join(intents), incoming_damage,
+                    hand_size, attack_ratio, skill_ratio, max_dmg,
+                    best_card_name, best_score, best_uuid
+                ])
+                f.flush() # 强制刷新
+                
+            self._log_debug(f"Recorded successfully: {best_card_name} ({best_score})")
+                
+        except Exception as e:
+            logger.error(f"Data collection error: {e}")
+            self._log_debug(f"Error: {e}")
+            import traceback
+            self._log_debug(traceback.format_exc())
 
     def _broadcast_state(self, recommendation: Dict[str, Any], status="In Game", cards=None):
         """将当前状态和推荐操作打包发送给 UI"""
@@ -387,6 +546,8 @@ class GameBridge(SimpleAgent):
             elif self.game.in_combat:
                 # 战斗界面
                 recommendations = self.calculate_recommendation()
+                # 数据采集
+                self._record_decision_step(recommendations)
                 self._broadcast_state(recommendations, status="Combat")
                 
             else:
