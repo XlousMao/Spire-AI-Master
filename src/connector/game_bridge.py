@@ -8,6 +8,7 @@ from typing import Dict, Any
 
 from spirecomm.ai.agent import SimpleAgent
 from spirecomm.spire.card import CardType
+from spirecomm.spire.screen import ScreenType
 from spirecomm.communication.action import PlayCardAction, EndTurnAction, Action
 
 # 配置日志
@@ -59,7 +60,7 @@ class GameBridge(SimpleAgent):
             except Exception as e:
                 logger.error(f"Socket accept error: {e}")
 
-    def _broadcast_state(self, recommendation: Dict[str, Any]):
+    def _broadcast_state(self, recommendation: Dict[str, Any], status="In Game", cards=None):
         """将当前状态和推荐操作打包发送给 UI"""
         if not self.client_socket:
             return
@@ -67,40 +68,59 @@ class GameBridge(SimpleAgent):
         # 提取当前游戏关键信息
         try:
             state_snapshot = {
-                "hand": [
-                    {
-                        "uuid": card.uuid,
-                        "name": card.name,
-                        "cost": card.cost,
-                        "type": str(card.type),
-                        "recommendation_score": recommendation.get(card.uuid, 0)
-                    }
-                    for card in self.game.hand
-                ],
-                "player": {
-                    "energy": self.game.player.energy,
-                    "block": self.game.player.block,
-                    "hp": self.game.player.current_hp,
-                    "max_hp": self.game.player.max_hp
-                },
-                "monsters": [
-                    {
-                        "name": m.name,
-                        "hp": m.current_hp,
-                        "max_hp": m.max_hp,
-                        "intent": str(m.intent),
-                        "damage": m.move_adjusted_damage
-                    }
-                    for m in self.game.monsters if not m.is_gone
-                ]
+                "status": status,
+                "hand": [],
+                "player": {},
+                "monsters": []
             }
+
+            if self.game:
+                # 决定要显示的卡牌列表：优先使用传入的 cards，否则使用手牌
+                cards_to_process = cards if cards is not None else self.game.hand
+                
+                hand_list = []
+                for card in cards_to_process:
+                    try:
+                        hand_list.append({
+                            "uuid": getattr(card, "uuid", ""), # Reward cards might not have uuid
+                            "name": getattr(card, "name", "Unknown"),
+                            "cost": getattr(card, "cost", -2),
+                            "type": str(getattr(card, "type", "UNKNOWN")),
+                            "recommendation_score": recommendation.get(getattr(card, "uuid", ""), recommendation.get(getattr(card, "card_id", ""), 0)) 
+                        })
+                    except Exception as ce:
+                        logger.error(f"Error serializing card: {ce}")
+                        continue
+                
+                state_snapshot["hand"] = hand_list
+
+                if self.game.player:
+                    state_snapshot["player"] = {
+                        "energy": getattr(self.game.player, "energy", 0),
+                        "block": getattr(self.game.player, "block", 0),
+                        "hp": getattr(self.game.player, "current_hp", 0),
+                        "max_hp": getattr(self.game.player, "max_hp", 0)
+                    }
+                if self.game.monsters:
+                    state_snapshot["monsters"] = [
+                        {
+                            "name": m.name,
+                            "hp": m.current_hp,
+                            "max_hp": m.max_hp,
+                            "intent": str(m.intent),
+                            "damage": m.move_adjusted_damage
+                        }
+                        for m in self.game.monsters if not m.is_gone
+                    ]
 
             # 发送 JSON 数据，以换行符分隔
             data = json.dumps(state_snapshot) + "\n"
             self.client_socket.sendall(data.encode('utf-8'))
+        except BrokenPipeError:
+            logger.warning("Client disconnected")
+            self.client_socket = None
         except Exception as e:
-            logger.error(f"Failed to send state: {e}")
-            self.client_socket = None  # 断开连接处理
+            logger.error(f"Broadcast error: {e}")
 
 
     def calculate_recommendation(self) -> Dict[str, int]:
@@ -319,19 +339,65 @@ class GameBridge(SimpleAgent):
             
         return recommendations
 
+    def calculate_reward_recommendation(self, cards) -> Dict[str, int]:
+        """计算选牌界面的推荐分数"""
+        recommendations = {}
+        for card in cards:
+            score = 50 # 基础分
+            
+            # 简单启发式评分
+            if card.type == CardType.POWER:
+                score += 20
+            elif card.type == CardType.ATTACK:
+                if "Bash" in card.name or "痛击" in card.name:
+                    score += 15
+                elif "Strike" in card.name or "打击" in card.name:
+                    score -= 10
+            
+            if card.upgrades > 0:
+                score += 10
+                
+            # 使用 card_id 作为 key，因为奖励牌可能没有 uuid
+            recommendations[card.card_id] = score
+            # 也尝试用 uuid
+            if hasattr(card, "uuid"):
+                recommendations[card.uuid] = score
+                
+        return recommendations
+
     def get_next_action_in_game(self, game_state):
         # print(f"DEBUG: Received Game State, Hand size: {len(game_state.hand)}", file=sys.stderr)
-        # 1. 让父类更新 self.game
-        super().get_next_action_in_game(game_state)
+        # 1. 更新本地 game 状态 (不要盲目调用 super()，因为它会触发 SimpleAgent 的自动决策逻辑导致崩溃)
+        self.game = game_state
         
-        # 2. 计算推荐
+        # 2. 根据当前屏幕类型计算推荐
         try:
-            recommendations = self.calculate_recommendation()
+            screen_type = self.game.screen_type
             
-            # 3. 广播给 UI
-            self._broadcast_state(recommendations)
+            if screen_type == ScreenType.CARD_REWARD:
+                # 选牌界面
+                reward_cards = self.game.screen.cards
+                recommendations = self.calculate_reward_recommendation(reward_cards)
+                self._broadcast_state(recommendations, status="Card Reward", cards=reward_cards)
+                
+            elif screen_type == ScreenType.MAP:
+                # 地图界面
+                self._broadcast_state({}, status="Map Select")
+                
+            elif self.game.in_combat:
+                # 战斗界面
+                recommendations = self.calculate_recommendation()
+                self._broadcast_state(recommendations, status="Combat")
+                
+            else:
+                # 其他界面 (如事件、商店等)
+                status_name = str(screen_type).split('.')[-1] if screen_type else "Event/Menu"
+                self._broadcast_state({}, status=status_name)
+                
         except Exception as e:
             logger.error(f"Error in recommendation/broadcast: {e}")
+            import traceback
+            traceback.print_exc()
 
         # 4. 自动打牌逻辑开关
         if not self.auto_play:
@@ -340,16 +406,24 @@ class GameBridge(SimpleAgent):
             time.sleep(0.5) 
             return NullAction()
             
-        # 5. 原有逻辑（暂时保留，以便开启 auto_play 时使用）
-        # 这里应该调用一个真正的决策函数，目前暂时返回 EndTurnAction
-        if self.game.end_available:
+        # 5. 如果开启了自动打牌，则调用父类逻辑或自定义逻辑
+        try:
+             return super().get_next_action_in_game(game_state)
+        except Exception as e:
+             logger.error(f"Auto-play logic error: {e}")
              return EndTurnAction()
-        return EndTurnAction()
 
     def get_next_action_out_of_game(self):
         """
         处理游戏外的状态（如菜单界面）。
         """
+        # 即使在游戏外，也广播状态（保持 UI 连接活跃）
+        try:
+            # 尝试广播空状态或上一次的状态
+            self._broadcast_state({}, status="Menu/Map")
+        except Exception as e:
+            logger.error(f"Error in out_of_game broadcast: {e}")
+
         if self.auto_start:
             return super().get_next_action_out_of_game()
         else:

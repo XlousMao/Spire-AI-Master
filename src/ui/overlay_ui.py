@@ -221,6 +221,12 @@ class OverlayWindow(QWidget):
     @Slot(dict)
     def update_data(self, data):
         try:
+            # 更新状态栏 (如果后端发送了 status)
+            if "status" in data:
+                self.status_label.setText(f"Connected: {data['status']}")
+            else:
+                self.status_label.setText("Connected")
+
             # 更新玩家信息
             player = data.get("player", {})
             hp = player.get("hp", "?")
